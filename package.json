@@ -2,8 +2,8 @@
   "name": "sti-research-chatbot",
   "private": true,
   "workspaces": [
-    "backend",
-    "frontend"
+    "frontend",
+    "backend"
   ],
   "scripts": {
     "dev": "concurrently \"npm --prefix backend run dev\" \"npm --prefix frontend run dev\"",

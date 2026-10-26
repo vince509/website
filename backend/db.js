@@ -7,15 +7,15 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const dbPath = path.join(__dirname, 'database.sqlite');
-const db = new sqlite3.Database(dbPath);
+const database = new sqlite3.Database(dbPath);
 
 export function getDatabase() {
-  return db;
+  return database;
 }
 
 export function runQuery(sql, params = []) {
   return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
+    database.run(sql, params, function (err) {
       if (err) {
         reject(err);
         return;
@@ -27,7 +27,7 @@ export function runQuery(sql, params = []) {
 
 export function fetchAll(sql, params = []) {
   return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
+    database.all(sql, params, (err, rows) => {
       if (err) {
         reject(err);
         return;
@@ -39,7 +39,7 @@ export function fetchAll(sql, params = []) {
 
 export function fetchOne(sql, params = []) {
   return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
+    database.get(sql, params, (err, row) => {
       if (err) {
         reject(err);
         return;
@@ -117,24 +117,14 @@ export async function initDatabase() {
     );
   `);
 
-  const indexes = [
-    'CREATE INDEX IF NOT EXISTS idx_documents_title ON documents(title);',
-    'CREATE INDEX IF NOT EXISTS idx_documents_author ON documents(authors);',
-    'CREATE INDEX IF NOT EXISTS idx_documents_category ON documents(category_id);',
-    'CREATE INDEX IF NOT EXISTS idx_documents_department ON documents(department);',
-    'CREATE INDEX IF NOT EXISTS idx_chat_user ON chat_history(user_id);',
-  ];
-
-  for (const sql of indexes) {
-    await runQuery(sql);
-  }
+  await runQuery('CREATE INDEX IF NOT EXISTS idx_documents_title ON documents(title);');
+  await runQuery('CREATE INDEX IF NOT EXISTS idx_documents_category ON documents(category_id);');
+  await runQuery('CREATE INDEX IF NOT EXISTS idx_documents_department ON documents(department);');
 }
 
 export async function seedDatabase() {
   const adminExists = await fetchOne('SELECT id FROM users WHERE username = ?', ['admin']);
-  if (adminExists) {
-    return;
-  }
+  if (adminExists) return;
 
   const adminHash = await bcrypt.hash('Admin123!', 10);
   const facultyHash = await bcrypt.hash('Faculty123!', 10);
@@ -142,68 +132,59 @@ export async function seedDatabase() {
 
   await runQuery(`
     INSERT INTO categories (name, description, created_at) VALUES
-     ('AI & Data Science', 'Artificial intelligence and data-driven research.', datetime('now')),
-     ('Cybersecurity', 'Study of secure systems, digital trust and information protection.', datetime('now')),
-     ('Education Technology', 'Technology-enabled learning, pedagogy and learning analytics.', datetime('now')),
-     ('Systems & Networks', 'Infrastructure, networking and system design.', datetime('now'));
+      ('AI & Data Science', 'Artificial intelligence and data-driven research.', CURRENT_TIMESTAMP),
+      ('Cybersecurity', 'Study of secure systems and digital trust.', CURRENT_TIMESTAMP),
+      ('Education Technology', 'Learning technology and academic support systems.', CURRENT_TIMESTAMP),
+      ('Systems & Networks', 'Infrastructure and network optimization research.', CURRENT_TIMESTAMP);
   `);
 
-  const adminUser = await runQuery(
-    `INSERT INTO users (name, username, email, password_hash, role, status, created_at, updated_at)
-     VALUES ('System Administrator', 'admin', 'admin@sti.edu', ?, 'admin', 'active', datetime('now'), datetime('now'))`,
-    [adminHash]
-  );
+  await runQuery(`
+    INSERT INTO users (name, username, email, password_hash, role, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'admin', 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+    ['System Administrator', 'admin', 'admin@sti.edu', adminHash]);
 
-  await runQuery(
-    `INSERT INTO users (name, username, email, password_hash, role, status, created_at, updated_at)
-     VALUES ('Faculty Member', 'faculty', 'faculty@sti.edu', ?, 'faculty', 'active', datetime('now'), datetime('now'))`,
-    [facultyHash]
-  );
+  await runQuery(`
+    INSERT INTO users (name, username, email, password_hash, role, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'faculty', 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+    ['Faculty Member', 'faculty', 'faculty@sti.edu', facultyHash]);
 
-  await runQuery(
-    `INSERT INTO users (name, username, email, password_hash, role, status, created_at, updated_at)
-     VALUES ('Student User', 'student', 'student@sti.edu', ?, 'student', 'active', datetime('now'), datetime('now'))`,
-    [studentHash]
-  );
+  await runQuery(`
+    INSERT INTO users (name, username, email, password_hash, role, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'student', 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+    ['Student User', 'student', 'student@sti.edu', studentHash]);
 
-  const docs = [
+  const sampleDocs = [
     {
       title: 'AI-Driven Learning Analytics in Higher Education',
       authors: 'R. Santos, M. Aquino',
       year: 2024,
-      abstract: 'This study evaluates learner engagement patterns and academic outcomes in digital learning environments using AI-powered analytics and adaptive feedback.',
+      abstract: 'This study evaluates engagement patterns and academic outcomes in digital learning environments using AI-powered analytics and adaptive feedback.',
       category_id: 1,
       course: 'Information Technology',
       department: 'College of Computing Studies',
-      file_name: 'ai-learning-analytics.txt',
-      file_path: path.join(__dirname, 'uploads', 'demo-ai-learning-analytics.txt'),
-      uploader_id: adminUser.lastID,
+      uploader_id: 1,
       is_protected: 0,
     },
     {
       title: 'Secure Mobile Banking Systems with Multi-Factor Authentication',
       authors: 'A. Reyes, J. Dela Cruz',
       year: 2023,
-      abstract: 'The paper examines secure authentication patterns and transaction monitoring strategies for mobile financial applications.',
+      abstract: 'The paper explores secure authentication design and transaction monitoring for mobile financial applications.',
       category_id: 2,
       course: 'Computer Security',
       department: 'College of Computing Studies',
-      file_name: 'secure-mobile-banking.txt',
-      file_path: path.join(__dirname, 'uploads', 'demo-secure-mobile-banking.txt'),
-      uploader_id: adminUser.lastID,
+      uploader_id: 1,
       is_protected: 1,
     },
     {
       title: 'Improving Student Retention Through Digital Feedback Systems',
       authors: 'P. Manalo, C. Garcia',
       year: 2022,
-      abstract: 'A study on how timely digital feedback and learner dashboards improve academic retention and course completion in undergraduate programs.',
+      abstract: 'A study on how digital feedback and learner dashboards affect retention and course completion.',
       category_id: 3,
       course: 'Education Technology',
       department: 'School of Teacher Education',
-      file_name: 'digital-feedback-systems.txt',
-      file_path: path.join(__dirname, 'uploads', 'demo-digital-feedback-systems.txt'),
-      uploader_id: adminUser.lastID,
+      uploader_id: 2,
       is_protected: 0,
     },
     {
@@ -214,51 +195,47 @@ export async function seedDatabase() {
       category_id: 4,
       course: 'Networking',
       department: 'College of Engineering',
-      file_name: 'network-optimization-campus-wifi.txt',
-      file_path: path.join(__dirname, 'uploads', 'demo-network-optimization-campus-wifi.txt'),
-      uploader_id: adminUser.lastID,
+      uploader_id: 2,
       is_protected: 0,
     },
   ];
 
-  for (const doc of docs) {
-    await runQuery(
-      `INSERT INTO documents (title, authors, year, abstract, category_id, course, department, file_name, file_path, uploader_id, is_protected, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-      [
-        doc.title,
-        doc.authors,
-        doc.year,
-        doc.abstract,
-        doc.category_id,
-        doc.course,
-        doc.department,
-        doc.file_name,
-        doc.file_path,
-        doc.uploader_id,
-        doc.is_protected,
-      ]
-    );
+  for (const doc of sampleDocs) {
+    await runQuery(`
+      INSERT INTO documents (title, authors, year, abstract, category_id, course, department, file_name, file_path, uploader_id, is_protected, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `, [
+      doc.title,
+      doc.authors,
+      doc.year,
+      doc.abstract,
+      doc.category_id,
+      doc.course,
+      doc.department,
+      `${doc.title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.txt`,
+      path.join(__dirname, 'uploads', `${doc.title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.txt`),
+      doc.uploader_id,
+      doc.is_protected,
+    ]);
   }
 
-  const sampleFiles = {
-    'demo-ai-learning-analytics.txt': 'AI-Driven Learning Analytics in Higher Education\n\nThis demonstration document summarizes an educational research study on AI-powered learning analytics. It explores student engagement signals, dashboard design and advising interventions.\n\nFindings suggest that timely intervention reduces dropout risk and improves academic performance when teachers receive actionable learner insights.',
-    'demo-secure-mobile-banking.txt': 'Secure Mobile Banking Systems with Multi-Factor Authentication\n\nThis sample document addresses digital trust, secure login patterns and layered protection for financial services. The study reviews MFA, risk-based detection and session security procedures.\n\nThe research concludes that layered authentication reduces fraudulent access while preserving usability.',
-    'demo-digital-feedback-systems.txt': 'Improving Student Retention Through Digital Feedback Systems\n\nThis demonstration paper compares online feedback systems, intervention timing and digital support workflows. It highlights the value of immediate guidance in raising retention and course completion rates.\n\nThe document suggests that learning dashboards improve student motivation when paired with meaningful teacher feedback.',
-    'demo-network-optimization-campus-wifi.txt': 'Network Optimization for Campus Wi-Fi Access\n\nThis file summarizes a study on network performance, bandwidth allocation and device density across campus learning spaces. It emphasizes load balancing, monitoring and structured network segmentation.\n\nThe findings point to better reliability and lower latency for online learning environments.',
+  const uploadsDir = path.join(__dirname, 'uploads');
+  fs.mkdirSync(uploadsDir, { recursive: true });
+
+  const sampleFileContents = {
+    'ai-driven-learning-analytics-in-higher-education.txt': 'AI-Driven Learning Analytics in Higher Education\n\nThis demonstration paper explores AI-powered learning analytics in university settings. It studies student engagement patterns and how institutions use dashboards to anticipate academic risk and support intervention.\n\nThe findings show that timely action reduces dropout risk and improves learning outcomes.',
+    'secure-mobile-banking-systems-with-multi-factor-authentication.txt': 'Secure Mobile Banking Systems with Multi-Factor Authentication\n\nThis sample paper details digital trust concerns in mobile financial services. It reviews layered authentication, transaction verification and secure session management.\n\nThe study stresses that secure user experience is essential for maintaining customer confidence.',
+    'improving-student-retention-through-digital-feedback-systems.txt': 'Improving Student Retention Through Digital Feedback Systems\n\nThe paper discusses digital feedback loops and their influence on learner retention. It examines how timely teacher response, dashboards and intervention workflows improve course completion and perceived support.\n\nResults show that structured feedback contributes to stronger student engagement.',
+    'network-optimization-for-campus-wi-fi-access.txt': 'Network Optimization for Campus Wi-Fi Access\n\nThis research investigates campus wireless reliability in high-density locations. It focuses on load balancing, device congestion, and network segmentation to improve performance.\n\nThe findings provide a practical framework for stable online learning experiences.'
   };
 
-  for (const [filename, content] of Object.entries(sampleFiles)) {
-    const fullPath = path.join(__dirname, 'uploads', filename);
+  for (const [name, content] of Object.entries(sampleFileContents)) {
+    const fullPath = path.join(uploadsDir, name);
     if (!fs.existsSync(fullPath)) {
       fs.writeFileSync(fullPath, content, 'utf8');
     }
   }
 }
 
-export async function ensureSeedFiles() {
-  const uploadsDir = path.join(__dirname, 'uploads');
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-await ensureSeedFiles();
+await initDatabase();
+await seedDatabase();

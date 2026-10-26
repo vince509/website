@@ -6,9 +6,8 @@ import bcrypt from 'bcryptjs';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
-import OpenAI from 'openai';
 import { fileURLToPath } from 'url';
-import { initDatabase, seedDatabase, getDatabase, runQuery, fetchOne, fetchAll } from './db.js';
+import { initDatabase, seedDatabase, fetchAll, fetchOne, runQuery, getDatabase } from './db.js';
 
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 
@@ -16,46 +15,37 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = Number(process.env.PORT || 5000);
-const isProduction = process.env.NODE_ENV === 'production';
-
 const uploadDir = path.join(__dirname, 'uploads');
+
 fs.mkdirSync(uploadDir, { recursive: true });
 
-app.use(
-  cors({
-    origin: process.env.CLIENT_URL || 'http://localhost:5173',
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  })
-);
-app.use(express.json({ limit: '10mb' }));
+app.use(cors({ origin: true, credentials: true }));
+app.use(express.json({ limit: '12mb' }));
 app.use(express.urlencoded({ extended: true }));
-app.use(
-  session({
-    name: 'sti.sid',
-    secret: process.env.SESSION_SECRET || 'sti-dev-secret',
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: isProduction,
-      maxAge: 1000 * 60 * 60 * 8,
-    },
-  })
-);
+app.use(session({
+  name: 'sti.sid',
+  secret: process.env.SESSION_SECRET || 'sti-dev-secret',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: false,
+    maxAge: 1000 * 60 * 60 * 8,
+  },
+}));
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, uploadDir),
   filename: (_req, file, cb) => {
-    const safeBase = file.originalname
+    const safe = file.originalname
       .replace(/\.[^/.]+$/, '')
       .replace(/[^a-zA-Z0-9-_ ]/g, '')
       .trim()
       .replace(/\s+/g, '-')
       .toLowerCase();
     const ext = path.extname(file.originalname).toLowerCase();
-    cb(null, `${Date.now()}-${safeBase}${ext}`);
+    cb(null, `${Date.now()}-${safe}${ext}`);
   },
 });
 
@@ -65,23 +55,22 @@ const upload = multer({
   fileFilter: (_req, file, cb) => {
     const allowed = ['.pdf', '.docx', '.txt'];
     const ext = path.extname(file.originalname).toLowerCase();
-    if (allowed.includes(ext)) {
-      cb(null, true);
-      return;
-    }
-    cb(new Error('Only PDF, DOCX and TXT files are allowed.'));
+    if (allowed.includes(ext)) cb(null, true);
+    else cb(new Error('Only PDF, DOCX and TXT files are allowed.'));
   },
 });
 
-const sanitizeUser = (user) => ({
-  id: user.id,
-  name: user.name,
-  username: user.username,
-  email: user.email,
-  role: user.role,
-  status: user.status,
-  created_at: user.created_at,
-});
+function sanitizeUser(user) {
+  return {
+    id: user.id,
+    name: user.name,
+    username: user.username,
+    email: user.email,
+    role: user.role,
+    status: user.status,
+    created_at: user.created_at,
+  };
+}
 
 function requireAuth(req, res, next) {
   if (!req.session.userId) {
@@ -95,10 +84,12 @@ function requireRole(roles) {
     if (!req.session.userId) {
       return res.status(401).json({ message: 'Authentication required.' });
     }
+
     const user = await fetchOne('SELECT * FROM users WHERE id = ?', [req.session.userId]);
     if (!user || !roles.includes(user.role)) {
       return res.status(403).json({ message: 'You do not have permission to perform this action.' });
     }
+
     next();
   };
 }
@@ -106,7 +97,7 @@ function requireRole(roles) {
 app.use('/uploads', express.static(uploadDir));
 
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', message: 'Academic repository API is running.' });
+  res.json({ status: 'ok', message: 'STI repository API is running.' });
 });
 
 app.post('/api/login', async (req, res) => {
@@ -124,17 +115,29 @@ app.post('/api/login', async (req, res) => {
     return res.status(401).json({ message: 'Invalid username or password.' });
   }
 
+  const match = await bcrypt.compare(password, user.password_hash);
+  if (!match) {
+    return res.status(401).json({ message: 'Invalid username or password.' });
+  }
+
   if (user.status !== 'active') {
     return res.status(403).json({ message: 'This account is inactive. Contact the administrator.' });
   }
 
-  const passwordMatch = await bcrypt.compare(password, user.password_hash);
-  if (!passwordMatch) {
-    return res.status(401).json({ message: 'Invalid username or password.' });
+  req.session.userId = user.id;
+  res.json({ message: 'Login successful.', user: sanitizeUser(user) });
+});
+
+app.get('/api/session', async (req, res) => {
+  if (!req.session.userId) return res.json({ user: null });
+
+  const user = await fetchOne('SELECT * FROM users WHERE id = ?', [req.session.userId]);
+  if (!user) {
+    req.session.destroy(() => {});
+    return res.json({ user: null });
   }
 
-  req.session.userId = user.id;
-  return res.json({ message: 'Login successful.', user: sanitizeUser(user) });
+  res.json({ user: sanitizeUser(user) });
 });
 
 app.post('/api/logout', (req, res) => {
@@ -144,67 +147,8 @@ app.post('/api/logout', (req, res) => {
   });
 });
 
-app.get('/api/session', async (req, res) => {
-  if (!req.session.userId) {
-    return res.json({ user: null });
-  }
-
-  const user = await fetchOne('SELECT * FROM users WHERE id = ?', [req.session.userId]);
-  if (!user) {
-    req.session.destroy(() => res.clearCookie('sti.sid'));
-    return res.json({ user: null });
-  }
-
-  return res.json({ user: sanitizeUser(user) });
-});
-
-app.get('/api/stats', requireRole(['admin']), async (_req, res) => {
-  const [totalDocs, totalUsers, totalCategories, recentUploads] = await Promise.all([
-    fetchOne('SELECT COUNT(*) as count FROM documents', []),
-    fetchOne('SELECT COUNT(*) as count FROM users', []),
-    fetchOne('SELECT COUNT(*) as count FROM categories', []),
-    fetchAll('SELECT d.id, d.title, d.created_at, u.name as uploader FROM documents d LEFT JOIN users u ON u.id = d.uploader_id ORDER BY d.created_at DESC LIMIT 5', []),
-  ]);
-
-  res.json({
-    totalDocuments: Number(totalDocs.count),
-    totalUsers: Number(totalUsers.count),
-    totalCategories: Number(totalCategories.count),
-    recentUploads,
-  });
-});
-
-app.get('/api/users', requireRole(['admin']), async (_req, res) => {
-  const users = await fetchAll(
-    'SELECT id, name, username, email, role, status, created_at FROM users ORDER BY created_at DESC',
-    []
-  );
-  res.json({ users });
-});
-
-app.post('/api/users', requireRole(['admin']), async (req, res) => {
-  const { name, username, email, password, role } = req.body || {};
-  if (!name || !username || !email || !password || !role) {
-    return res.status(400).json({ message: 'All fields are required.' });
-  }
-
-  const exists = await fetchOne('SELECT id FROM users WHERE username = ? OR email = ?', [username, email]);
-  if (exists) {
-    return res.status(409).json({ message: 'A user with that username or email already exists.' });
-  }
-
-  const passwordHash = await bcrypt.hash(password, 10);
-  const result = await runQuery(
-    'INSERT INTO users (name, username, email, password_hash, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, datetime("now"), datetime("now"))',
-    [name, username, email, passwordHash, role, 'active']
-  );
-
-  const user = await fetchOne('SELECT id, name, username, email, role, status, created_at FROM users WHERE id = ?', [result.lastID]);
-  res.status(201).json({ message: 'User created successfully.', user });
-});
-
 app.get('/api/categories', async (_req, res) => {
-  const categories = await fetchAll('SELECT * FROM categories ORDER BY name ASC', []);
+  const categories = await fetchAll('SELECT * FROM categories ORDER BY name ASC');
   res.json({ categories });
 });
 
@@ -215,27 +159,71 @@ app.post('/api/categories', requireRole(['admin']), async (req, res) => {
   }
 
   const result = await runQuery(
-    'INSERT INTO categories (name, description, created_at) VALUES (?, ?, datetime("now"))',
-    [name.trim(), description || '']
+    'INSERT INTO categories (name, description, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)',
+    [String(name).trim(), description || '']
   );
 
   const category = await fetchOne('SELECT * FROM categories WHERE id = ?', [result.lastID]);
-  res.status(201).json({ message: 'Category added successfully.', category });
+  res.status(201).json({ category });
+});
+
+app.get('/api/stats', requireRole(['admin']), async (_req, res) => {
+  const totalDocuments = await fetchOne('SELECT COUNT(*) as count FROM documents');
+  const totalUsers = await fetchOne('SELECT COUNT(*) as count FROM users');
+  const totalCategories = await fetchOne('SELECT COUNT(*) as count FROM categories');
+
+  res.json({
+    totalDocuments: Number(totalDocuments.count),
+    totalUsers: Number(totalUsers.count),
+    totalCategories: Number(totalCategories.count),
+  });
+});
+
+app.get('/api/users', requireRole(['admin']), async (_req, res) => {
+  const users = await fetchAll('SELECT id, name, username, email, role, status, created_at FROM users ORDER BY created_at DESC');
+  res.json({ users });
+});
+
+app.post('/api/users', requireRole(['admin']), async (req, res) => {
+  const { name, username, email, password, role } = req.body || {};
+  if (!name || !username || !email || !password || !role) {
+    return res.status(400).json({ message: 'All user fields are required.' });
+  }
+
+  const exists = await fetchOne('SELECT id FROM users WHERE username = ? OR email = ?', [username, email]);
+  if (exists) {
+    return res.status(409).json({ message: 'Username or email already exists.' });
+  }
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  const result = await runQuery(
+    'INSERT INTO users (name, username, email, password_hash, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, "active", CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+    [name, username, email, passwordHash, role]
+  );
+
+  const user = await fetchOne('SELECT id, name, username, email, role, status, created_at FROM users WHERE id = ?', [result.lastID]);
+  res.status(201).json({ user, message: 'User created successfully.' });
 });
 
 app.get('/api/documents', async (req, res) => {
   const { search, category, year, department, course } = req.query;
-  const filters = [];
+
+  let sql = `
+    SELECT d.*, c.name AS category_name
+    FROM documents d
+    LEFT JOIN categories c ON c.id = d.category_id
+  `;
   const params = [];
+  const filters = [];
 
   if (search) {
-    const term = `%${String(search).trim()}%`;
     filters.push('(LOWER(d.title) LIKE ? OR LOWER(d.authors) LIKE ? OR LOWER(d.abstract) LIKE ? OR LOWER(d.course) LIKE ? OR LOWER(d.department) LIKE ? OR LOWER(c.name) LIKE ?)');
+    const term = `%${String(search).toLowerCase()}%`;
     params.push(term, term, term, term, term, term);
   }
 
   if (category) {
-    filters.push('c.id = ?');
+    filters.push('d.category_id = ?');
     params.push(Number(category));
   }
 
@@ -254,22 +242,17 @@ app.get('/api/documents', async (req, res) => {
     params.push(`%${String(course).toLowerCase()}%`);
   }
 
-  const whereClause = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
-  const documents = await fetchAll(
-    `SELECT d.*, c.name AS category_name, u.name AS uploader_name
-     FROM documents d
-     LEFT JOIN categories c ON c.id = d.category_id
-     LEFT JOIN users u ON u.id = d.uploader_id
-     ${whereClause}
-     ORDER BY d.created_at DESC`,
-    params
-  );
+  if (filters.length) sql += ` WHERE ${filters.join(' AND ')}`;
+  sql += ' ORDER BY d.created_at DESC';
 
-  res.json({ documents: documents.map((doc) => ({
+  const documents = await fetchAll(sql, params);
+
+  const transformed = documents.map((doc) => ({
     ...doc,
-    canDownload: !doc.is_protected || ['admin', 'faculty'].includes(req.session.userRole || ''),
     fileUrl: doc.file_path ? `/uploads/${path.basename(doc.file_path)}` : null,
-  })) });
+  }));
+
+  res.json({ documents: transformed });
 });
 
 app.get('/api/documents/:id', async (req, res) => {
@@ -282,26 +265,25 @@ app.get('/api/documents/:id', async (req, res) => {
     [req.params.id]
   );
 
-  if (!document) {
-    return res.status(404).json({ message: 'Document not found.' });
-  }
+  if (!document) return res.status(404).json({ message: 'Document not found.' });
 
   const related = await fetchAll(
-    `SELECT d.*
-     FROM documents d
-     WHERE d.id != ? AND (
-       LOWER(d.title) LIKE ? OR LOWER(d.abstract) LIKE ? OR LOWER(d.authors) LIKE ?
-     )
-     ORDER BY d.created_at DESC
-     LIMIT 4`,
-    [document.id, `%${document.title.toLowerCase()}%`, `%${document.abstract.toLowerCase()}%`, `%${document.authors.toLowerCase()}%`]
+    `SELECT * FROM documents WHERE id != ? AND (
+      LOWER(title) LIKE ? OR LOWER(authors) LIKE ? OR LOWER(abstract) LIKE ?
+    ) ORDER BY created_at DESC LIMIT 4`,
+    [
+      document.id,
+      `%${String(document.title || '').toLowerCase()}%`,
+      `%${String(document.authors || '').toLowerCase()}%`,
+      `%${String(document.abstract || '').toLowerCase()}%`,
+    ]
   );
 
-  res.json({ document: { ...document, related } });
+  res.json({ document: { ...document, related, fileUrl: document.file_path ? `/uploads/${path.basename(document.file_path)}` : null } });
 });
 
 app.post('/api/documents', requireRole(['faculty', 'admin']), upload.single('file'), async (req, res) => {
-  const { title, authors, year, abstract, category_id, course, department, is_protected } = req.body;
+  const { title, authors, year, abstract, category_id, course, department, is_protected } = req.body || {};
 
   if (!title || !authors || !year || !abstract || !category_id) {
     return res.status(400).json({ message: 'Title, authors, year, abstract and category are required.' });
@@ -311,9 +293,9 @@ app.post('/api/documents', requireRole(['faculty', 'admin']), upload.single('fil
     return res.status(400).json({ message: 'A document file is required.' });
   }
 
-  const record = await runQuery(
+  const result = await runQuery(
     `INSERT INTO documents (title, authors, year, abstract, category_id, course, department, file_name, file_path, uploader_id, is_protected, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime("now"), datetime("now"))`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
     [
       title,
       authors,
@@ -325,24 +307,22 @@ app.post('/api/documents', requireRole(['faculty', 'admin']), upload.single('fil
       req.file.originalname,
       req.file.path,
       req.session.userId,
-      is_protected === 'true' || is_protected === true ? 1 : 0,
+      is_protected === 'true' ? 1 : 0,
     ]
   );
 
-  const document = await fetchOne('SELECT * FROM documents WHERE id = ?', [record.lastID]);
-  res.status(201).json({ message: 'Document uploaded successfully.', document });
+  const document = await fetchOne('SELECT * FROM documents WHERE id = ?', [result.lastID]);
+  res.status(201).json({ document, message: 'Document uploaded successfully.' });
 });
 
 app.get('/api/documents/:id/download', requireAuth, async (req, res) => {
   const document = await fetchOne('SELECT * FROM documents WHERE id = ?', [req.params.id]);
-  if (!document) {
-    return res.status(404).json({ message: 'Document not found.' });
-  }
+  if (!document) return res.status(404).json({ message: 'Document not found.' });
 
   const user = await fetchOne('SELECT role FROM users WHERE id = ?', [req.session.userId]);
-  const isAuthorized = !document.is_protected || (user && ['admin', 'faculty'].includes(user.role));
+  const canDownload = !document.is_protected || (user && ['admin', 'faculty'].includes(user.role));
 
-  if (!isAuthorized) {
+  if (!canDownload) {
     return res.status(403).json({ message: 'You are not authorized to download this protected document.' });
   }
 
@@ -361,110 +341,74 @@ app.get('/api/profile', requireAuth, async (req, res) => {
 
 app.put('/api/profile', requireAuth, async (req, res) => {
   const { name, email, password } = req.body || {};
-  const updateParts = [];
+  const updates = [];
   const params = [];
 
   if (name) {
-    updateParts.push('name = ?');
+    updates.push('name = ?');
     params.push(name);
   }
 
   if (email) {
-    updateParts.push('email = ?');
+    updates.push('email = ?');
     params.push(email);
   }
 
   if (password) {
-    updateParts.push('password_hash = ?');
+    updates.push('password_hash = ?');
     params.push(await bcrypt.hash(password, 10));
   }
 
-  if (!updateParts.length) {
-    return res.status(400).json({ message: 'No profile changes provided.' });
+  if (!updates.length) {
+    return res.status(400).json({ message: 'No valid changes provided.' });
   }
 
   params.push(req.session.userId);
-  await runQuery(`UPDATE users SET ${updateParts.join(', ')}, updated_at = datetime("now") WHERE id = ?`, params);
+  await runQuery(`UPDATE users SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, params);
+
   const user = await fetchOne('SELECT id, name, username, email, role, status, created_at FROM users WHERE id = ?', [req.session.userId]);
-  res.json({ message: 'Profile updated successfully.', user });
+  res.json({ user, message: 'Profile updated successfully.' });
 });
 
 app.post('/api/chat', async (req, res) => {
-  const question = (req.body && req.body.question) ? String(req.body.question).trim() : '';
-  if (!question) {
-    return res.status(400).json({ message: 'Please ask a question to search the repository.' });
-  }
+  const question = String(req.body?.question || '').trim();
+  if (!question) return res.status(400).json({ message: 'Please ask a question to search the repository.' });
 
-  const searchTerms = question.toLowerCase().split(/\s+/).filter(Boolean);
-  const docs = await fetchAll(
-    `SELECT d.*, c.name AS category_name
-     FROM documents d
-     LEFT JOIN categories c ON c.id = d.category_id
-     WHERE LOWER(d.title) LIKE ?
-        OR LOWER(d.authors) LIKE ?
-        OR LOWER(d.abstract) LIKE ?
-        OR LOWER(d.course) LIKE ?
-        OR LOWER(d.department) LIKE ?
-        OR LOWER(c.name) LIKE ?
-     ORDER BY d.created_at DESC LIMIT 5`,
-    [
-      ...new Array(6).fill(`%${question.toLowerCase()}%`),
-    ]
-  );
+  const sql = `
+    SELECT d.*, c.name AS category_name
+    FROM documents d
+    LEFT JOIN categories c ON c.id = d.category_id
+    WHERE LOWER(d.title) LIKE ?
+       OR LOWER(d.authors) LIKE ?
+       OR LOWER(d.abstract) LIKE ?
+       OR LOWER(d.course) LIKE ?
+       OR LOWER(d.department) LIKE ?
+       OR LOWER(c.name) LIKE ?
+    ORDER BY d.created_at DESC
+    LIMIT 5
+  `;
 
-  const fallbackSummary = docs.length
-    ? docs.map((doc) => `${doc.title} by ${doc.authors} (${doc.year})`).join('; ')
-    : 'No repository documents matched the question.';
+  const params = new Array(6).fill(`%${question.toLowerCase()}%`);
+  const results = await fetchAll(sql, params);
 
-  let finalAnswer = `I found ${docs.length} relevant document(s) in the repository. ${fallbackSummary}`;
-  let aiUsed = false;
-
-  if (process.env.OPENAI_API_KEY) {
-    try {
-      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-      const chunks = docs.slice(0, 3).map((doc) => `${doc.title} - ${doc.abstract}`);
-      const completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are an assistant helping users find academic documents from a repository. Use only the provided repository context. Clearly label AI-generated content and never fabricate documents or authors.',
-          },
-          {
-            role: 'user',
-            content: `User question: ${question}\nRepository context:\n${chunks.join('\n---\n') || 'No results found.'}`,
-          },
-        ],
-      });
-
-      finalAnswer = completion.choices[0]?.message?.content || finalAnswer;
-      aiUsed = true;
-    } catch (error) {
-      finalAnswer = `AI generation was unavailable. Repository fallback response: ${finalAnswer}`;
-      aiUsed = false;
-    }
-  }
+  let answer = results.length
+    ? `I found ${results.length} relevant repository document(s). ${results.map((doc) => `${doc.title} by ${doc.authors}`).join('; ')}`
+    : 'No matching documents were found in the repository. Try a broader question or check a different course or keyword.';
 
   if (req.session.userId) {
-    await runQuery(
-      'INSERT INTO chat_history (user_id, question, response, created_at) VALUES (?, ?, ?, datetime("now"))',
-      [req.session.userId, question, finalAnswer]
-    );
+    await runQuery('INSERT INTO chat_history (user_id, question, response, created_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)', [req.session.userId, question, answer]);
   }
 
   res.json({
-    answer: finalAnswer,
-    results: docs,
-    aiUsed,
-    source: aiUsed ? 'OpenAI API' : 'Repository keyword search fallback',
+    answer,
+    results,
+    aiUsed: false,
+    source: 'Repository keyword search fallback',
   });
 });
 
 app.get('/api/chat/history', requireAuth, async (req, res) => {
-  const history = await fetchAll(
-    'SELECT id, question, response, created_at FROM chat_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 10',
-    [req.session.userId]
-  );
+  const history = await fetchAll('SELECT id, question, response, created_at FROM chat_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 10', [req.session.userId]);
   res.json({ history });
 });
 
@@ -476,8 +420,6 @@ app.listen(PORT, async () => {
 
 process.on('SIGINT', () => {
   const db = getDatabase();
-  if (db && typeof db.close === 'function') {
-    db.close();
-  }
+  if (db && typeof db.close === 'function') db.close();
   process.exit(0);
 });
